@@ -1,0 +1,828 @@
+---
+title: "Predicting Chest Discomfort and Blood Pressure Categories using NHANES 2017-2018"
+subtitle: "Here's a place for a subtitle if you use one"
+author: "Ritesh KC"
+date: 2023-05-09
+format: 
+  html:
+    toc: true
+    number-sections: true
+    code-fold: show
+    code-tools: true
+    code-overflow: wrap
+    embed-resources: true
+    date-format: iso
+    theme: zephyr  ## change the theme if you prefer
+---
+
+## R Packages and Setup {.unnumbered}
+
+```{r}
+knitr::opts_chunk$set(comment = NA) 
+
+library(janitor) 
+library(broom)
+library(GGally)
+library(gtsummary)
+library(haven)
+library(knitr)
+library(nhanesA)
+library(naniar)
+library(patchwork)
+library(ROCR)
+library(brant)
+library(glue)
+library(mice)
+library(rstanarm)
+library(tidymodels)
+library(caret)
+library(MASS)
+library(gmodels) 
+library(nnet)
+library(rsample)
+library(simputation)
+library(rms)
+library(tidyverse) 
+
+theme_set(theme_bw(base_size = 15)) 
+```
+
+# Background
+Cardiovascular diseases (CVDs) are the leading cause of death in the United States. In the year 2020,  697,000 people in the United States died from heart disease (2). Among many CVDs, more than four out of five CVD deaths are due to heart attacks and strokes. The risk factors of heart disease and stroke are unhealthy diet, physical inactivity, tobacco use and harmful use of alcohol among others. The effects of behavioral risk factors may show up in individuals as raised blood pressure and other symptoms such as discomfort or pain in the chest and indicate an increased risk for CVDs. Therefore, predicting the risk of CVDs is of great significance for disease management, including timely intervention and rational drug use. 
+
+# Data Source
+The National Health and Nutrition Examination Survey (NHANES) is a program of studies designed to assess the health and nutritional status of adults and children in the United States. The survey combines interviews and physical examinations and the findings from these surveys are used to determine the prevalence of major diseases and risk factors for diseases. Data from these surveys also help to develop public health policies, programs and services. 
+2017-2018 survey data is described in detail here: <https://wwwn.cdc.gov/nchs/nhanes/continuousnhanes/default.aspx?BeginYear=2017>
+
+The reason I picked 2017-2018 data is because NHANES program suspended field operations in March 2020 due to the corona virus disease 2019 (COVID-19) pandemic. Therefore, the data collection for the latest NHANES 2019-2020 cycle was not completed and the collected data are not nationally representative. Further it might have additional biases in surveys due to the pandemic itself. 
+
+# Loading and Tidying the Raw Data
+
+## NHANES data we will collect 
+NHANES data contain several data documents which are broadly divided into several categories such as demographic data,  examination data, dietary data, laboratory data, questionnaire data. The variables I picked are under following categories. 
+
+1. Demographic Data
+* SEQN = Respondent identifying code
+* RIAGENDER = Gender of respondents at the time of the screening interview, 1 Male, 2 Female
+* RIDAGEYR = Age in years, 0-79 range of values, 80 and above=80
+2. Examination Data:
+* BPXPULS = Pulse regular or irregular, 1 Regular, 2 Irregular
+* BPXSY1 = Systolic blood pressure in mm of Hg, first reading, range of values  
+* BPXDI1 = Diastolic blood pressure in mm of Hg, first reading, range of values
+* BMXBMI = Body mass index (Kg/m^2), range of values, . missing
+* SLD012 = Sleep hours weekend or workdays 
+3. Laboratory Data
+* LBXTC = Total cholesterol (mg/dL), range of values
+* LBDHDD = Direct HDL-Cholesterol (mg/dL), range of values
+4. Questionnaire Data
+* BPQ080 = Doctor told you high cholesterol level, 1 Yes, 2 No
+* CDQ001 = SP ever had pain or discomfort in chest, 1 Yes, 2 No
+* PAQ605 = Vigorous work activity for 10mins in a week, 1 Yes, 2 No
+* PAQ620 = Moderate work activity for 10mins in a week, 1 Yes, 2 No
+* PAD680 = Minutes of sedentary activity, range of values, 7777 refused, 9999 don't know
+* DIQ010 = Doctor told you if you have diabetes, 1 = Yes, 2 = No, 3 = borderline
+* SMQ040 = Do you now smoke cigarette, 1 = Everyday, 2 = Someday, 3 = No
+
+# Data Ingest and Management
+First I pulled in all the required data from the NHANES 2017-2018. Then, I joined all the data by using left join function and using SEQN as the reference and converted into tibble.  
+```{r}
+bpq_1 <- read_xpt("BPQ_J.XPT") |> dplyr::select(SEQN, BPQ080)
+bpm_1 <- read_xpt("BPX_J.XPT") |> dplyr::select(SEQN, BPXPULS, BPXSY1, BPXDI1)
+bmi_1 <- read_xpt("BMX_J.XPT") |> dplyr::select(SEQN, BMXBMI)
+sldq_1 <- read_xpt("SLQ_J.XPT") |> dplyr::select(SEQN, SLD012)
+tchl_1 <- read_xpt("TCHOL_J.XPT") |> dplyr::select(SEQN, LBXTC)
+hdl_1 <- read_xpt("HDL_J.XPT") |> dplyr::select(SEQN, LBDHDD)
+demo_1 <- read_xpt("DEMO_J.XPT") |> dplyr::select(SEQN, RIAGENDR, RIDAGEYR)
+card_h <- read_xpt("CDQ_J.XPT") |>  dplyr::select(SEQN, CDQ001)
+phy_a <- read_xpt("PAQ_J.XPT") |> dplyr::select(SEQN, PAQ605, PAQ620, PAD680)
+dia_a <- read_xpt("DIQ_J.XPT") |> dplyr::select(SEQN, DIQ010)
+smq_1 <- read_xpt("SMQ_J.XPT") |> dplyr::select(SEQN, SMQ040)
+
+df1 <- demo_1 |>  left_join(bpq_1, by="SEQN") |> left_join(bpm_1, by="SEQN") |> left_join(bmi_1, by="SEQN") |> left_join(sldq_1, by="SEQN") |> left_join(tchl_1, by="SEQN") |> left_join(hdl_1, by="SEQN") |> left_join(card_h, by="SEQN") |> left_join(phy_a, by="SEQN")|> left_join(dia_a, by="SEQN")|> left_join(smq_1, by="SEQN") |> tibble()
+```
+
+
+I further sorted subjects that are between the age of 45 and 75. This age group is selected on the basis of their association with risk of cardiovascular diseases.
+```{r}
+df1 <- df1 |> filter(RIDAGEYR > 45 & RIDAGEYR < 75)
+```
+
+
+## Checking Complete Cases on Output Variable 
+I am planning to use blood pressure categories, which include both systolic and diastolic and chest discomfort as my outcome variable. Therefore, I only picked data that has complete cases in our outcome variable.
+```{r}
+df1 <- df1 |> drop_na(c(BPXSY1,BPXDI1,CDQ001)) #complete cases for output variable
+
+miss_var_summary(df1) |> filter(n_miss > 0)
+```
+
+Next, I dropped all cases that has "NA" is smoking variable. The motivation of dropping "NA" on smoking variable is that smoking could be a risk factor for blood pressure increase and chest pain and the it has too many missing data (~54%). Therefore, by excluding NA the data would be more manageable and interpretable. 
+```{r}
+df1 <- df1 |> drop_na(SMQ040)
+
+miss_var_summary(df1) |> filter(n_miss > 0)
+```
+## Creating bp_cat Variable 
+Further, I divided blood pressure into four groups based on systolic and diastolic blood pressure values and categories used by American Heart Association. 
+Systolic less than 120 and diastolic less than 80 = Normal 
+Systolic 120-129 and diastolic less than 80  = Elevated
+Systolic 130-139 or diastolic 80-89 = Hypertension stage 1
+Systolic over 140 or diastolic over 90 = Hypertension stage 2
+Blood pressure categories are added as a new variable (bp_cat) in the data.  
+```{r}
+#Group bp into 4 groups based on systolic and diastolic values. 
+df1 <- df1 |> mutate(bp_cat = factor(case_when(BPXSY1 < 120 & BPXDI1 < 80 ~"1",
+                                               BPXSY1 >= 120 & BPXSY1 < 130 & BPXDI1 < 80 ~"2",
+                                               BPXSY1 >= 130 & BPXSY1 < 139 | BPXDI1 >= 80 & BPXDI1 < 90 ~"3",
+                                               BPXSY1 >= 140 | BPXDI1 >= 90 ~"4")))
+```
+
+
+# Cleaning the Data
+
+## Select Variables
+Variables are selected and named accordingly. The variables that needed to be changed to factor are also converted accordingly.
+```{r}
+df2 <- df1 |> mutate (id = as.character(SEQN),
+         age = RIDAGEYR,
+         sex = as.factor(RIAGENDR),
+         bmi = BMXBMI,
+         sleep = SLD012,
+         chol = LBXTC,
+         hdl = LBDHDD,
+         inact = PAD680,
+         chst_pain = as.factor(CDQ001),
+         smoke = as.factor(SMQ040),
+         bp_cat = as.factor(bp_cat)) 
+
+df2 <-  df2 |> dplyr:: select(id, age, sex, bmi, sleep, chol, hdl,inact, smoke, chst_pain, bp_cat)
+```
+
+## Recoding Factor Variables
+Suggestion from Dr. Love after presentation, I am re-coding all factor variable here.
+```{r}
+df2 <- df2 |> mutate(sex = fct_recode(sex, "M"="1", "F"="2"),
+                     smoke = fct_recode(smoke, "Everyday"="1", "Sometimes"="2", "Never"="3"),
+                     chst_pain = fct_recode(chst_pain, "CP_Yes" = "1", "CP_No" = "2"),
+                     bp_cat = fct_recode(bp_cat, "Normal" = "1", "Elevated" = "2", "Hypertension_Stage_1" = "3", "Hypertension_Stage_2" = "4"))
+
+```
+
+
+
+## Checking Quantitative Variables
+```{r}
+df2 |> dplyr::select(age, bmi, sleep, chol, hdl, inact) |> summary()
+```
+Looking at the summary of our quantitative variable ranges for age and sleep look plausible. However, the maximum for bmi, chol, hdl looks a bit too high. I will see if they will show up as outlier later. The max range for inact is 9999 which is due to the respondent answer of "don't know", which I will remove next. 
+
+## Remove 9999 values from Inact 
+The max range for inact was 9999, which corresponds to the respondent's answer of "don't know". I removed them from inact variable.
+```{r}
+df2 <- df2 |> filter(inact != '9999')
+dim(df2)
+```
+Now my data has 1045 rows and 11 columns.
+
+## Checking Categorical Variables
+```{r}
+df2 |> tabyl(sex)
+df2 |> tabyl(chst_pain)
+df2 |> tabyl(smoke)
+df2 |> tabyl(bp_cat)
+```
+The dataset doesn't seem to have any odd observations in any of the categorical variable.
+
+## Checking for Missingness
+```{r}
+summary(complete.cases(df2))
+
+miss_var_summary(df2)|> filter(n_miss > 0)
+```
+In my data df2, I have a total of 969 complete cases. I have 61 missing values each for chol and hdl. In addition 11 values are missing from variable sleep and 8 values are missing from variable bmi.   
+
+
+# The Tidy Tibble
+## Listing the Tibble
+```{r}
+df2
+```
+## Size and Identifiers
+```{r}
+dim(df2)
+
+n_distinct(df2$id)
+```
+My table called df2 has now 1045 rows and 11 columns corresponding to observations and variables respectively. My indicator variable is id, which is unique for each row shown by the distinct number of rows above. 
+
+## Saving the Tibble
+```{r}
+saveRDS(df2, "projectBportfolio_df2.riteshkc.Rds")
+```
+
+# Code Book and Description
+1. Sample Size: The sample of my data consists of 1045 subjects between the age of 45 and 75 from NHANES 2017-2018 for whom the outcome variable is chst_pain and bp_cat. 
+2. Missingness: There are a total of 969 complete cases. chol and hdl are missing 61 values each, sleep is missing 11 values, and bmi is missing 8.
+3. Outcome : My outcome variable is chst_pain, which is whether the respondents said "yes" or "no" to the question if they have any pain or discomfort in the chest. Another outcome variable is the blood pressure groups that I created on the basis of American Heart Association categorization. Both of our outcome variables do not have any missing data. 
+4. Predictors: Candidate predictors for my outcome includes age, sex, bmi, sleep ,inact, smoke that are common for both logistic and multicategorical prediction. While chol is included for multicategorical model and hdl for logistic model.
+5. Id: The variable id my tibble is the subject identifying code.
+
+## Defining the Variables
+```{r}
+tbl_summary(dplyr::select(df2, -id), 
+            label = list(
+            age = "Age (in years)",
+            sex = "sex (Male/ Female)",
+            bmi = "Body Mass Index (in Kg/m^2)",
+            sleep = "sleep (in sleep hours per day)?",
+            chol = "Total Cholesterol (in mg/dL)",
+            hdl = "High Density Lipid (im mg/dL)",
+            inact = "Sedenatry Status (hours per day)",
+            smoke = "smoking Status (Everyday/ Sometimes/ Never)",
+            chst_pain = "Chest Pain (CP_Yes/ CP_No)",
+            bp_cat = "Blood Pressure Groups (Normal/ Elevated/ Hypertension Stage 1/ Hypertension Stage 2)"),
+        stat = list(all_continuous() ~ 
+                "{median} [{min} to {max}]" ))
+```
+## Numeric Descripton
+```{r}
+describe(df2) |> html()
+```
+
+
+
+# Analysis 
+## My First Research Question
+How well can we predict blood pressure groups using age, sex, bmi, sleep hour, total cholesterol level, sedentary minutes, and smoking status in a sample of 1045 NHANES participants ages 45-75?
+
+### My Categorical Outcome
+* My categorical outcome is bp_cat and I am predicting this value using other demographic and risk factors.
+* I have a complete data in bp_cat for all 1045 of my subjects.
+
+
+Lets check the distribution of samples across my bp_group categories.
+```{r}
+ggplot(df2, aes(x = bp_cat, fill = bp_cat)) + 
+  geom_bar(aes(y = (after_stat(count))/sum(after_stat(count)))) + 
+  geom_text(aes(y = (after_stat(count))/sum(after_stat(count)),
+label = scales::percent((after_stat(count)) / sum(after_stat(count)))),
+              stat = "count", vjust = 1,
+color = "white", size = 5) + scale_y_continuous(labels = scales::percent) + scale_fill_brewer(palette = "Dark2") + guides(fill = FALSE) +
+labs(y = "percentage")
+```
+The histogram shows that we have highest percentage of subjects in category 3 (hypertension stage 1) and lowest percentage of subjects in category 2 (elevated). The actual number of samples in group 1-4 are  261, 189, 351, 244 respectively. I have enough samples for each group. Therefore, merging of categories is not necessary.
+
+### My Planned Predictors (Categorical Outcome)
+* age has 29 distinct values, and is measured in years.
+* sex has two distinct values 1 for male 2 for female. 
+* bmi has 285 distinct values, measured in kg/m^2.
+* sleep has 22 distinct values, measured in hours per day. 
+* chol has 204 distinct values, measured in mg/dL. 
+* inact has 33 distinct values, measured in minutes per day
+* smoke has three distinct categories 1 for smoke everyday, 2 for smoke sometimes , 3 for never. 
+
+### My Anticipated Outcome
+I expect that the odds of being in lower blood pressure group is associated with younger age, with being female, with lower bmi, with more sleeping hours,  with low cholesterol, with low inactive minutes, and with no smoking.   
+
+## Ordinal Logistic Regression Model
+
+### Missingness 
+Lets check the complete cases and missingness in the data 
+```{r}
+n_case_complete(df2)
+miss_var_summary(df2) |> filter(n_miss > 0)
+```
+
+
+### Single Imputation Approach
+I assume data are missing at random. I used simple imputation approach using mice package and the method of predictive mean matching. I further checked the summary of missing variable, which shows there are no missing values. 
+```{r}
+set.seed(4325)
+
+df2_imp <- complete(mice(df2 , m = 1, method = "pmm"))     # Predictive mean matching imputation
+
+miss_var_summary(df2_imp) |> filter(n_miss > 0)
+```
+
+### Scatterplot Matrix and Collinearity
+
+```{r}
+GGally::ggpairs(df2_imp |> 
+dplyr::select(age, sex, bmi, sleep, chol, inact, smoke, bp_cat))+
+theme_bw()
+```
+
+The data may look little chaotic here. However, few things to note. Young people seem to be in normal bp category. There seems to be low correlation especially between bmi and inactivity and cholesterol and age. However, nothing too concerning. 
+
+
+
+In order to make sure my ordinal categorical outcome variables are ordered, I reordered them.   
+```{r}
+str(df2_imp$bp_cat) # to check the bp_cat variable
+
+df2_imp$bp_cat <- factor(df2_imp$bp_cat, ordered = T, levels = c('Normal', 'Elevated', 'Hypertension_Stage_1', 'Hypertension_Stage_2'))
+# define reference by ensuring it is the first level of the factor
+
+str(df2_imp$bp_cat) #ordinal factor check 
+```
+
+## Splitting Data into Train and Test
+I will split sample into training (70%) and testing (30%) using function from dplyr package
+```{r}
+set.seed(43223)
+
+split_samples <- df2_imp$bp_cat |> createDataPartition(p = 0.7, list = FALSE)
+
+df2_imp_train <- df2_imp[split_samples,] 
+df2_imp_test <- df2_imp[-split_samples,]
+
+dim(df2_imp_train) #Check the dimension of splitted data.
+dim(df2_imp_test)
+
+```
+
+## Fitting Polr Model Using Train Sample
+I am running the ordinal regression model using the polr function in the MASS package on training sample. Further, the coefficients are converted into interpretable odds ratios using the exp() command.
+```{r}
+mod_polr <- polr(bp_cat ~ age + sex + bmi + sleep + chol + inact + smoke , data = df2_imp_train, Hess = TRUE) 
+
+exp(coef(mod_polr)) 
+
+exp(confint(mod_polr))
+
+```
+
+## Tidy for Polr Model
+```{r}
+tidy(mod_polr, exponentiate = TRUE, conf.int = TRUE) |> kable(digits = 3)
+```
+
+My model predicts that other variables remaining constant, if Harry is one year older than sally, he will have 1.03 (95% CI 1.02,	1.05) the odds of sally to be in elevated blood pressure categories. Therefore an increase in age is associated with poor blood pressure categories (higher order). 
+My model predicts that other variables remaining constant, if Harry sleeps one hour longer than sally, he will have 0.92 (95% CI 0.85,	0.99) the odds of sally to be in elevated blood pressure categories. Therefore an increase in sleeping hour is associated with improved blood pressure categories. 
+
+The usability of a proportional odds logistic regression model depends on the assumption that each input variable has a similar effect on the different levels of the ordinal outcome variable. To test the proportional odds assumption, I used brant package. 
+```{r}
+brant(mod_polr)
+```
+A low p-value in a Brant-Wald test is an indicator that the coefficient does not satisfy the proportional odds assumption. Here my p-value (0.19) is greater than 0.05 which suggests that there is some evidence that the assumption of proportional odds is satisfied by the model. Lets see now how the multinational model fits. 
+
+
+## Running Multinomial Model
+Since my output variables are already ordered, I do not have to relevel.
+```{r}
+mod_mno <- multinom(bp_cat ~ age + sex + bmi + sleep + chol + inact + smoke , data = df2_imp_train)
+
+mod_mno
+
+exp(coef(mod_mno))  
+
+```
+My multinomial model predicts that for one year increase in age, the odds of being in elevated blood pressure increases by 1.06 (95% CI 1.04, 1.09) vs being in normal blood pressure if other variables remain constant.
+
+
+## Tidy for Multinomial Model
+```{r}
+tidy(mod_mno, exponentiate = TRUE, conf.int = TRUE) |> kable(digits = 3)
+```
+
+## Comparing AIC and BIC of Proportional Odd or Multinomial logit models
+```{r}
+
+AIC(mod_polr)
+AIC(mod_mno)
+BIC(mod_polr)
+BIC(mod_mno)
+
+compare <- data.frame(Model = c("Proportional Odds", "Multinomial"),
+  AIC = c(1986.778, 1998.617),
+  BIC = c(2037.346, 2122.74))
+
+compare |> kable(digits = 2)
+          
+```
+Since AIC and BIC of proportional odd model is smaller than the multinomial model, proportional odd model is our preferred model. This is consistent with meeting the assumption of proportional odds shown by Brant Test.  
+
+Now my preferred model is ordinal logistic model.
+
+## Evaluating the ordinal logistic model Model
+
+### Prediction Accuracy of the Model Using Train Data
+```{r}
+pred_train <- predict(mod_polr, df2_imp_train)
+```
+
+### Confusion Matrix and Accuracy of Train Data
+```{r}
+con_mat_train <- table(pred_train, df2_imp_train$bp_cat)
+con_mat_train
+
+sum(diag(con_mat_train))/sum(con_mat_train) 
+```
+### Prediction Accuracy of the Model Using Test Data
+```{r}
+pred_test <- predict(mod_polr, df2_imp_test)
+```
+
+### Confusion Matrix and Accuracy of Test Data
+```{r}
+con_mat_test <- table(pred_test, df2_imp_test$bp_cat)
+con_mat_test
+
+sum(diag(con_mat_test))/sum(con_mat_test)
+```
+The prediction accuracy of the training sample is 37% and test sample is 33%. The model seemed to be poorly fitting here and doesn't seem to predict elevated blood pressure group well.
+
+
+## Using Lrm for Proportional Odds Logistic Regression on Train Sample
+```{r}
+d <- datadist(df2_imp_train)
+options(datadist = "d")
+mod_lrm <- lrm(bp_cat ~ age + sex + bmi + sleep + chol + inact + smoke , data = df2_imp_train,  x = T, y = T)
+```
+
+### Output of Lrm Model
+```{r}
+mod_lrm
+```
+My model has pretty poor C-statistics (0.58) and Somer's Dxy (0.17), which suggest very low predictive performance. From the Wald test, it appears that age, bmi, sleep, inact adds significantly detectable value to the model. 
+
+### Effect size of the Lrm Model
+```{r}
+summary(mod_lrm)
+```
+
+### Effect size plot of the LRM model
+```{r}
+plot(summary(mod_lrm))
+```
+Interpretation for the age variable: Summary plot suggest that an increase in age from 55 to 67 is 1.49 (95% CI 1.21, 1.83) times the odds of being in elevated blood pressure category compared to normal blood pressure category if other variables in the model remain constant. 
+
+### Validation of the Lrm Model
+I used bootstrap validation method using default parameters
+```{r}
+set.seed(4325); validate(mod_lrm)
+
+C_statiscic <-  print(0.5+.1195/2)
+```
+My validated proportional odds model using LRM has Nagelskerke (R^2) of 0.018 and C-statistics of 0.559 with Somer's D value of 0.119. The model is fitting very poorly. 
+
+
+# Analysis 2
+
+## My Second Research Question
+How well can we can we predict chest pain or discomfort in chest using age, sex, bmi, sleep hour, hdl level, sedentary minutes, and smoking status in a sample of 1045 NHANES participants ages 45-75?
+
+## My Categorical Outcome
+* My categorical outcome is chst_pain and I am predicting this value using other demographic and risk factors.
+* I have a complete data in bp_cat for all 1045 of my subjects.
+
+
+## My Planned Predictors (Categorical Outcome)
+* age has 29 distinct values, and is measured in years.
+* sex has two distinct values 1 for male 2 for female. 
+* bmi has 285 distinct values, measured in kg/m^2.
+* sleep has 22 distinct values, measured in hours per day. 
+* hdl has 83 distinct values, measured in mg/dL. 
+* inact has 33 distinct values, measured in minutes per day
+* smoke has three distinct categories 1 for smoke everyday, 2 for smoke sometimes , 3 for never. 
+
+## My Anticipated Outcome
+I expect that the odds of chest pain is associated with older age, with being male, with higher bmi, with less sleeping hours,  with low hdl, with high inactive minutes, and with smoking.   
+
+
+Lets check the distribution of samples across my chst_pain categories.
+```{r}
+ggplot(df2, aes(x = chst_pain, fill = chst_pain)) + 
+  geom_bar(aes(y = (after_stat(count))/sum(after_stat(count)))) + 
+  geom_text(aes(y = (after_stat(count))/sum(after_stat(count)),
+label = scales::percent((after_stat(count)) / sum(after_stat(count)))),
+              stat = "count", vjust = 1,
+color = "white", size = 5) + scale_y_continuous(labels = scales::percent) + scale_fill_brewer(palette = "Dark2") + guides(fill = FALSE) +
+labs(y = "percentage")
+```
+The histogram shows that we have ~36 percent of subjects (372) who have chest pain and ~64 (673) percent of subjects who didn't have any chest pain. 
+
+## Prepare My Outcome
+we want our binary outcome to be a factor variable.
+```{r}
+str(df2$chst_pain)
+df2 |> tabyl(chst_pain)
+```
+We have ~36% in chest pain categories and ~64% in no chest pain categories in both testing and training samples. 
+
+
+## Checking Proper Order of Outcome Variable
+Proper re leveling of outcome variable is necessary for stan modeling. Let's check bmi values across chst_pain categories.
+```{r}
+dat <- df2 |> dplyr::select(bmi, chst_pain)
+  ggplot(dat, aes(x = factor(chst_pain), y = bmi)) +
+    geom_violin(aes(fill = factor(chst_pain))) +
+    geom_boxplot(width = 0.3, notch = TRUE) +
+    stat_summary(aes(fill = factor(chst_pain)), fun = "mean", geom = "point",
+                 shape = 23, size = 3) +
+    guides(fill = "none", col = "none") +
+    scale_fill_viridis_d(option = "cividis", alpha = 0.3) +
+    coord_flip() +
+    labs(x = "Chest Pain?",
+         y = "bmi(in Kg/m^2)",
+         title = "Chest Pain plot vs bmi",
+         subtitle = glue(nrow(dat), " NHANES participants in 2017-2018"))
+
+```
+bmi is higher in chest pain group and lower in no chest pain group. This suggests that increase in bmi is associated with the increased odds of chest pain or odds should be greater than one. 
+
+Lets look at the chest pain prediction using only bmi.
+```{r}
+mage_1 <- glm(chst_pain ~ bmi, family = binomial,
+              data = df2)
+tidy(mage_1) |> kable(digits = 3)
+tidy(mage_1, exponentiate = TRUE) |> kable(digits = 3)
+```
+The model is predicting that the odds of chest pain is lower than one with the increase in bmi. However, based on the violin plot above, it should be higher. Therefore, I have to relevel the chst_pain outcome variable.
+
+
+I will create df3 with releveled chst_pain. Let's check the level of chst_pain first.
+```{r}
+str(df2$chst_pain) #Check for levels
+df3 <- df2 |> mutate(chst_pain = fct_relevel(chst_pain, "CP_No", "CP_Yes")) #Relevel
+str(df3$chst_pain) #Check for relevel
+```
+
+## Split df3 into Train and Test
+I will split df3 based on chst_pain reference.
+```{r}
+set.seed(4321)
+df3_splits <- initial_split(df3, prop = 0.7, strata = chst_pain)
+df3_train <- training(df3_splits)
+df3_test <- testing(df3_splits)
+```
+
+## Check Stratification
+Lets check if the splitting of the data worked.
+```{r}
+df3_train |> tabyl(chst_pain)
+df3_test |> tabyl(chst_pain)
+```
+
+## Build a Recipe for My Model
+```{r}
+df3_rec <- recipe(chst_pain ~ age + sex + bmi + sleep + hdl + inact + smoke, data = df3) |>
+    step_impute_bag(all_predictors()) |>
+    step_dummy(all_nominal(), -all_outcomes()) |>
+    step_normalize(all_predictors())
+```
+
+While building a recipe, I specified an output variable, imputed all variables, and created dummy variable and normalized all predictors. 
+
+
+## Specify the Engine for My fit
+```{r}
+df3_glm_model <- logistic_reg() |> set_engine("glm")
+
+prior_dist <- rstanarm::normal(0, 3)
+
+df3_stan_model <- logistic_reg() |> set_engine("stan", prior_intercept = prior_dist, prior = prior_dist)
+```
+
+## Creating Workflow to Fit Models
+```{r}
+df3_glm_wf <- workflow() |>
+    add_model(df3_glm_model) |>
+    add_recipe(df3_rec)
+df3_stan_wf <- workflow() |>
+    add_model(df3_stan_model) |>
+    add_recipe(df3_rec)
+```
+
+## Fit Glm and Stan Model
+```{r}
+fit_glm <- fit(df3_glm_wf, df3_train)
+set.seed(432)
+fit_stan <- fit(df3_stan_wf, df3_train)
+```
+
+
+## Tied Coefficeint in Log Odds Scale for Glm Model
+```{r}
+glm_tidy <- tidy(fit_glm, conf.int = T) |>
+    mutate(modname = "glm")
+stan_tidy <- broom.mixed::tidy(fit_stan, conf.int = T) |>
+    mutate(modname = "stan")
+coefs_comp <- bind_rows(glm_tidy, stan_tidy)
+coefs_comp
+```
+
+## Tied Coefficeint of Glm Model in Odds Scale 
+```{r}
+glm_odds <- glm_tidy |> 
+  mutate(odds = exp(estimate),
+  odds_low = exp(conf.low),
+  odds_high = exp(conf.high)) |>
+  filter(term != "(Intercept)") |>
+  dplyr::select(modname, term, odds, odds_low, odds_high)
+glm_odds
+```
+## Tied Coefficeint of Stan Model in Odds Scale
+```{r}
+stan_odds <- stan_tidy |> 
+  mutate(odds = exp(estimate),
+  odds_low = exp(conf.low),
+  odds_high = exp(conf.high)) |>
+  filter(term != "(Intercept)") |>
+  dplyr::select(modname, term, odds, odds_low, odds_high)
+glm_odds
+```
+
+## Comparison of Coefficients of Glm and Stan Model
+```{r}
+coefs_comp <- bind_rows(glm_odds, stan_odds) 
+coefs_comp
+```
+
+```{r}
+ggplot(coefs_comp, aes(x = term, y = odds, col = modname,
+                       ymin = odds_low, ymax = odds_high)) +
+  geom_point(position = position_dodge2(width = 0.4)) +
+  geom_pointrange(position = position_dodge2(width = 0.4)) +
+  geom_hline(yintercept = 1, lty = "dashed") +
+  coord_flip() +
+  labs(x = "", y = "Estimate (with 95% confidence interval)",
+   title = "Comparing the glm and stan model coefficients")
+```
+The point estimates look fairly similar between my glm and stan model, however, the glm model seem to have wider confidence interval. The odds of chest pain decreases with less smoking, increase in hdl level and increase in sedentary minutes. While the increase in the odds of chest pain is  associated with older age, increase in bmi, being female and increase in sleep hours, based on point estimates.  
+
+## Evaluating Train Sample Performance
+
+### Making Prediction with Glm Fit
+```{r}
+glm_probs <- predict(fit_glm, df3_train, type = "prob") |>
+    bind_cols(df3_train |> dplyr::select(chst_pain))
+head(glm_probs, 5)
+```
+
+
+Next, we’ll use roc_auc from yardstick. This assumes that the first level of df2_train is the thing we’re trying to predict. Is that true in our case?
+```{r}
+df3_train |> tabyl(chst_pain)
+```
+This is not correct. I am going to predict CP_Yes which the second level in chst_pain variable. So, I need to switch event level to second.
+
+```{r}
+glm_probs |> roc_auc(chst_pain, .pred_CP_Yes, event_level = "second") |>
+    kable(dig = 5)
+```
+## ROC curve for Glm Fit
+```{r}
+glm_roc <- glm_probs |> roc_curve(chst_pain, .pred_CP_Yes, event_level = "second")
+autoplot(glm_roc)
+```
+### Making Prediction with Stan Fit in Train Sample
+```{r}
+stan_probs <- predict(fit_stan, df3_train, type = "prob") |> 
+  bind_cols(df3_train |> dplyr::select(chst_pain))
+  head(stan_probs, 5)
+```
+
+```{r}
+stan_probs |> roc_auc(chst_pain, .pred_CP_Yes, event_level = "second" ) |>
+    kable(dig = 5)
+```
+
+
+## ROC curve for Stan Fit
+```{r}
+stan_roc <- stan_probs |> roc_curve(chst_pain, .pred_CP_Yes, event_level = "second")
+autoplot(stan_roc)
+```
+My C statistic for both Glm and Stan fit is also 0.589
+
+
+## Establishing a Decision Rule for the Glm Fit
+Let’s use .pred_CP_Yes > 0.35 for now to indicate a prediction of chst_pain.
+```{r}
+glm_probs <- predict(fit_glm, df3_train, type = "prob") |>
+    bind_cols(df3_train |> dplyr::select(chst_pain)) |>
+    mutate(chst_pain_pre = ifelse(.pred_CP_Yes > 0.35, "CP_Yes", "CP_No")) |> 
+    mutate(chst_pain_pre = fct_relevel(factor(chst_pain_pre), "CP_No"))
+
+glm_probs |> tabyl(chst_pain_pre, chst_pain)
+```
+
+## Confusion Matrix and Accuracy for Glm Fit
+```{r}
+conf_mat(glm_probs, truth = chst_pain, estimate = chst_pain_pre)
+metrics(glm_probs, truth = chst_pain, estimate = chst_pain_pre)
+```
+## Plot Confusion Matrix for Glm Fit
+```{r}
+conf_mat(glm_probs, truth = chst_pain, estimate = chst_pain_pre) |>
+    autoplot(type = "heatmap")
+```
+
+## Establishing a Decision Rule for the Stan Fit
+
+Let’s use .pred_1 > 0.35 for now to indicate a prediction of chst_pain.
+```{r}
+stan_probs <- predict(fit_stan, df3_train, type = "prob") |>
+    bind_cols(df3_train |> dplyr::select(chst_pain)) |>
+    mutate(chst_pain_pre = ifelse(.pred_CP_Yes > 0.35, "CP_Yes", "CP_No")) |> 
+    mutate(chst_pain_pre = fct_relevel(factor(chst_pain_pre), "CP_No"))
+
+stan_probs |> tabyl(chst_pain_pre, chst_pain)
+```
+
+## Confusion Matrix and Accuracy for Stan Fit
+```{r}
+conf_mat(stan_probs, truth = chst_pain, estimate = chst_pain_pre)
+metrics(stan_probs, truth = chst_pain, estimate = chst_pain_pre)
+```
+The accuracy of stan model does not seem to be any better than glm model in training sample (0.558 vs 0.554).
+
+
+## Plot Confusion Matrix for Stan Fit
+```{r}
+conf_mat(stan_probs, truth = chst_pain, estimate = chst_pain_pre) |>
+    autoplot(type = "heatmap")
+```
+
+## Assess Test Sample Performance.
+```{r}
+glm_test <- predict(fit_glm, df3_test, type = "prob") |>
+    bind_cols(df3_test |> dplyr::select(chst_pain))
+
+stan_test <- predict(fit_stan, df3_test, type = "prob") |> 
+  bind_cols(df3_test |> dplyr::select(chst_pain))
+```
+
+
+### Test Sample C statistic comparison
+```{r}
+glm_test |> roc_auc(chst_pain, .pred_CP_Yes, event_level = "second" ) |>
+    kable(dig = 5)
+
+stan_test |> roc_auc(chst_pain, .pred_CP_Yes, event_level = "second" ) |>
+    kable(dig = 5)
+```
+C-statistics from glm fit is similar to the the C-statistics from stan fit in test sample. 
+
+
+## Confusion Matrix and Model Accuracy for glm test sample
+```{r}
+glm_test <- predict(fit_glm, df3_test, type = "prob") |>
+    bind_cols(df3_test |> dplyr::select(chst_pain)) |>
+    mutate(chst_pain_pre = ifelse(.pred_CP_Yes > 0.35, "CP_Yes", "CP_No")) |> 
+    mutate(chst_pain_pre = fct_relevel(factor(chst_pain_pre), "CP_No"))
+
+glm_test |> tabyl(chst_pain_pre, chst_pain)
+
+conf_mat(glm_test, truth = chst_pain, estimate = chst_pain_pre)
+
+metrics(glm_test, truth = chst_pain, estimate = chst_pain_pre)
+```
+
+## Confusion Matrix and Model Accuracy for stan test sample
+```{r}
+stan_test <- predict(fit_glm, df3_test, type = "prob") |>
+    bind_cols(df3_test |> dplyr::select(chst_pain)) |>
+    mutate(chst_pain_pre = ifelse(.pred_CP_Yes > 0.35, "CP_Yes", "CP_No")) |> 
+    mutate(chst_pain_pre = fct_relevel(factor(chst_pain_pre), "CP_No"))
+
+stan_test |> tabyl(chst_pain_pre, chst_pain)
+
+conf_mat(stan_test, truth = chst_pain, estimate = chst_pain_pre)
+
+metrics(glm_test, truth = chst_pain, estimate = chst_pain_pre)
+```
+The accuracy of stan model does not seem to be any better than glm model in training sample (0.554 vs 0.554)
+
+## Plot Confusion Matrix
+```{r}
+conf_mat(glm_test, truth = chst_pain, estimate = chst_pain_pre) |>
+    autoplot(type = "heatmap")
+conf_mat(stan_test, truth = chst_pain, estimate = chst_pain_pre) |>
+    autoplot(type = "heatmap")
+```
+# Conclusions and Discussion
+I used proportional odds logistic model to predict blood pressure groups on NHANES 2017-2018 age 45-75 based on the given predictors age, sex, bmi, cholesterol, sleep, sedentary minute, smoking categories. My model has validated C-statistics of 0.56 and Somer's Dxy of 0.119 with Nagelkerke R2 of 0.018, which suggest very poor fitting model, slightly better than random prediction probability. My proportional odd model estimated the odds of being in poor blood pressure categories is associated with increase in age, bmi, and cholesterol. However, the odds is decreased with increase in sleep hour and sedentary minutes. Interestingly, smoking status showed decreased association with the odds of being in poor blood pressure categories with effect size including zero, meaning no difference.  <br />  Further, I used Bayesian (stan)  and glm model to predict chest pain outcome on NHANES 2017-2018 age 45-75 using the given predictors age, sex, bmi, hdl , sleep, sedentary minute, smoking categories. The point estimates look fairly similar between my glm and stan model, however, the glm model seem to have wider confidence interval. The odds of chest pain decreases with less smoking, increase in hdl level and increase in sedentary minutes. While the increase in the odds of chest pain is  associated with older age, increase in bmi, being female and increase in sleep hours, based on point estimates. Both of my models have similar C-statistics of 0.589 with accuracy of 0.55 in both train and test sample.  <br />  For the models I generated, I used main effects only. The models could benefit if I add nonlinear terms or interactions. For multicategorical prediction would have been better if I had merged elevated blood pressure with another blood pressure category as the sample size was comparatively lower in elevated blood pressure category. The model seem to fail predicting elevated blood pressure category. Addition of better predictors, for example in the case of sedentary minutes, it would have been better if I had added active hours instead. It is possible that people that are highly active can stay sedentary for longer time.
+ 
+## Answering My Research Questions 
+### Answering My First Research Question
+The increase in age, bmi, and cholesterol increases the odds of being in higher blood pressure category (poor blood pressure category) and increase in sleep and sedentary minutes decreases the odds of being in high blood pressure categories if other variables remain constant. Smoking does not seem to show much of a difference in predicting the odds of being in any blood pressure categories. 
+
+### Answering My Second Research Question
+The odds of chest pain decreases with less smoking, increase in hdl level, and increase in sedentary minutes. While the increase in the odds of chest pain is  associated with older age, increase in bmi, being female and increase in sleep hours, based on point estimates.
+
+
+# References and Acknowledgments
+
+## References
+1. Data Source description
+https://wwwn.cdc.gov/nchs/nhanes/continuousnhanes/default.aspx?BeginYear=2017
+
+2. Tsao CW, Aday AW, Almarzooq ZI, Beaton AZ, Bittencourt MS, Boehme AK, et al. Heart Disease and Stroke Statistics—2022 Update: A Report From the American Heart Association. Circulation. 2022;145(8):e153–e639.
+
+# Session Information
+
+```{r}
+xfun::session_info()
+```
