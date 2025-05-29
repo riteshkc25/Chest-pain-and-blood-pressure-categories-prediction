@@ -29,6 +29,7 @@ The primary goals of the project are to:
 
 ## 📁 Project Structure  
 ```
+├── projectBportfolio_riteshkc.pdf      # Rendered pdf report of the full analysis
 ├── projectBportfolio_riteshkc.html     # Rendered HTML report of the full analysis
 ├── projectBportfolio_riteshkc.qmd      # Full analysis quarto file
 ├── projectBportfolio_df2               # Cleaned NHANES datasets for the project
